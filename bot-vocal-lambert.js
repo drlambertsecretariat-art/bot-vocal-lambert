@@ -195,58 +195,99 @@ app.post('/garde-info', (req, res) => {
 });
 
 // ============================================================
+// SESSIONS EN MÉMOIRE (évite les URLs trop longues)
+// ============================================================
+const sessions = {};
+
+function sauvegarderSession(appelant, data) {
+  sessions[appelant] = { ...sessions[appelant], ...data, ts: Date.now() };
+  // Nettoyer les sessions > 1h
+  Object.keys(sessions).forEach(k => {
+    if (Date.now() - sessions[k].ts > 3600000) delete sessions[k];
+  });
+}
+
+function getSession(appelant) {
+  return sessions[appelant] || {};
+}
+
+// ============================================================
 // COLLECTE GÉNÉRIQUE : NOM → TÉLÉPHONE → FIN
-// Utilisé par toutes les branches
-// params: motif, details, priorite passés en query
 // ============================================================
 app.post('/collecter-nom', (req, res) => {
   const { appelant, motif, details, priorite } = req.query;
   const twiml = new VoiceResponse();
-  collecterNom(twiml, `/collecter-nom-enregistre?appelant=${encodeURIComponent(appelant)}&motif=${encodeURIComponent(motif)}&details=${encodeURIComponent(details)}&priorite=${priorite}`);
+  sauvegarderSession(appelant, { motif, details, priorite });
+  say(twiml, 'Après le bip, dites votre prénom et votre nom, puis patientez.');
+  twiml.record({
+    action: `/collecter-nom-enregistre?appelant=${encodeURIComponent(appelant)}`,
+    transcribe: true,
+    maxLength: 10,
+    playBeep: true,
+    trim: 'trim-silence'
+  });
   res.type('text/xml').send(twiml.toString());
 });
 
 app.post('/collecter-nom-enregistre', (req, res) => {
-  const { appelant, motif, details, priorite } = req.query;
+  const { appelant } = req.query;
   const recordingUrl = req.body.RecordingUrl || '';
   const twiml = new VoiceResponse();
-  collecterTelephone(twiml, `/collecter-tel?appelant=${encodeURIComponent(appelant)}&motif=${encodeURIComponent(motif)}&details=${encodeURIComponent(details)}&priorite=${priorite}&audio=${encodeURIComponent(recordingUrl)}`);
+  sauvegarderSession(appelant, { audio: recordingUrl });
+  const gather = twiml.gather({
+    input: 'dtmf',
+    finishOnKey: '#',
+    timeout: 15,
+    action: `/collecter-tel?appelant=${encodeURIComponent(appelant)}`
+  });
+  say(gather, 'Tapez votre numéro de téléphone suivi de la touche dièse. Pour revenir au menu, tapez zéro.');
   res.type('text/xml').send(twiml.toString());
 });
 
 app.post('/collecter-tel', (req, res) => {
-  const { appelant, motif, details, priorite, audio } = req.query;
+  const { appelant } = req.query;
   const tel = req.body.Digits || '';
   const twiml = new VoiceResponse();
-  // Confirmation du numéro
+
+  if (tel === '0') {
+    twiml.redirect('/entree');
+    return res.type('text/xml').send(twiml.toString());
+  }
+
+  sauvegarderSession(appelant, { tel });
+  const telLu = tel.split('').join(' ');
   const gather = twiml.gather({
     numDigits: 1,
     timeout: 8,
-    action: `/collecter-tel-confirm?appelant=${encodeURIComponent(appelant)}&motif=${encodeURIComponent(motif)}&details=${encodeURIComponent(details)}&priorite=${priorite}&audio=${encodeURIComponent(audio)}&tel=${encodeURIComponent(tel)}`
+    action: `/collecter-tel-confirm?appelant=${encodeURIComponent(appelant)}`
   });
-  // Formater le numéro pour la lecture vocale
-  const telLu = tel.split('').join(' ');
   say(gather, `Vous avez tapé le ${telLu}. Si c'est correct, tapez 1. Pour recommencer, tapez 2.`);
   res.type('text/xml').send(twiml.toString());
 });
 
 app.post('/collecter-tel-confirm', async (req, res) => {
-  const { appelant, motif, details, priorite, audio, tel } = req.query;
+  const { appelant } = req.query;
   const digit = req.body.Digits;
   const twiml = new VoiceResponse();
+  const session = getSession(appelant);
 
   if (digit === '2') {
-    // Recommencer la saisie du téléphone
-    collecterTelephone(twiml, `/collecter-tel?appelant=${encodeURIComponent(appelant)}&motif=${encodeURIComponent(motif)}&details=${encodeURIComponent(details)}&priorite=${priorite}&audio=${encodeURIComponent(audio)}`);
+    const gather = twiml.gather({
+      input: 'dtmf',
+      finishOnKey: '#',
+      timeout: 15,
+      action: `/collecter-tel?appelant=${encodeURIComponent(appelant)}`
+    });
+    say(gather, 'Tapez votre numéro de téléphone suivi de la touche dièse.');
     return res.type('text/xml').send(twiml.toString());
   }
 
-  // Envoyer l'email avec tout
-  const detailsFinal = `${decodeURIComponent(details)}\n→ Numéro rappel : ${tel}`;
-  await envoyerEmail(appelant, decodeURIComponent(motif), detailsFinal, priorite, decodeURIComponent(audio));
-  // Message de fin explicite avant finStandard
+  // Envoyer l'email
+  const detailsFinal = `${session.details || ''}\n→ Numéro rappel : ${session.tel || 'non fourni'}`;
+  await envoyerEmail(appelant, session.motif || 'Message', detailsFinal, session.priorite || 'RAPPEL_J1', session.audio || null);
+
   say(twiml, 'Votre message a bien été enregistré.');
-  finStandard(twiml, tel || appelant);
+  finStandard(twiml, appelant);
   res.type('text/xml').send(twiml.toString());
 });
 
@@ -319,7 +360,6 @@ app.post('/douleur-fin', (req, res) => {
   const twiml = new VoiceResponse();
   const priorite = intense === 'true' ? 'URGENTE' : 'RAPPEL_J1';
   const details = `Type : Douleur\n→ Intense : ${intense === 'true' ? 'OUI' : 'Non'}\n→ Chaud/froid : ${chaudFroid ? 'Oui' : 'Non'}`;
-  say(twiml, `En cas de gonflement, appelez le quinze ou votre médecin traitant.`);
   twiml.redirect(`/collecter-nom?appelant=${encodeURIComponent(appelant)}&motif=${encodeURIComponent('Urgence – Douleur dentaire')}&details=${encodeURIComponent(details)}&priorite=${priorite}`);
   res.type('text/xml').send(twiml.toString());
 });
