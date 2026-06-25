@@ -33,7 +33,7 @@ const DOCTOLIB = 'Doctolib, Docteur Lambert à Emmerin';
 // EMAIL
 // ============================================================
 async function envoyerEmail(appelant, motif, details, priorite, audioUrl = null) {
-  const emojis = { URGENTE: '🔴', RAPPEL_J1: '🟠', RAPPEL_48H: '🟡', INFO: '🟢' };
+  const emojis = { URGENTE: '🔴', RAPPEL_J1: '🟠', RAPPEL_48H: '🟢', INFO: '⚪' };
   const labels = {
     URGENTE: 'URGENT — rappeler rapidement',
     RAPPEL_J1: 'Rappel demain matin',
