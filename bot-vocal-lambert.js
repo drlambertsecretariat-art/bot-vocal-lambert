@@ -4,34 +4,34 @@
 // ============================================================
 const express = require('express');
 const twilio = require('twilio');
-const nodemailer = require('nodemailer');
+const SibApiV3Sdk = require('sib-api-v3-sdk');
 const VoiceResponse = twilio.twiml.VoiceResponse;
-
+ 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
-
+ 
 // ============================================================
-// CONFIGURATION — À MODIFIER
+// CONFIGURATION — via variables d'environnement Render
 // ============================================================
 const CONFIG = {
-  email: 'drlambertsecretariat@gmail.com',
-  gmailPassword: 'VOTRE_MOT_DE_PASSE_GMAIL',
-  // Récupérer dans console Twilio → Account Info
-  twilioAccountSid: 'VOTRE_ACCOUNT_SID',
-  twilioAuthToken: 'VOTRE_AUTH_TOKEN',
+  email: process.env.EMAIL || 'drlambertsecretariat@gmail.com',
+  brevoApiKey: process.env.BREVO_API_KEY,
+  twilioAccountSid: process.env.TWILIO_ACCOUNT_SID,
+  twilioAuthToken: process.env.TWILIO_AUTH_TOKEN,
 };
-
+ 
+// Init Brevo
+const defaultClient = SibApiV3Sdk.ApiClient.instance;
+const apiKey = defaultClient.authentications['api-key'];
+apiKey.apiKey = CONFIG.brevoApiKey;
+const brevoApi = new SibApiV3Sdk.TransactionalEmailsApi();
+ 
 const GARDE = '0320332033';
 const DOCTOLIB = 'Doctolib, Docteur Lambert à Emmerin';
-
+ 
 // ============================================================
 // EMAIL
 // ============================================================
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: { user: CONFIG.email, pass: CONFIG.gmailPassword }
-});
-
 async function envoyerEmail(appelant, motif, details, priorite, audioUrl = null) {
   const emojis = { URGENTE: '🔴', RAPPEL_J1: '🟠', RAPPEL_48H: '🟡', INFO: '🟢' };
   const labels = {
@@ -55,14 +55,13 @@ ${details}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Cabinet du Docteur Lambert — Emmerin (59320)
 03 20 38 56 88`;
-
-  const mailOptions = {
-    from: CONFIG.email,
-    to: CONFIG.email,
-    subject: sujet,
-    text: corps
-  };
-
+ 
+  const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+  sendSmtpEmail.to = [{ email: CONFIG.email }];
+  sendSmtpEmail.sender = { email: CONFIG.email, name: 'Bot Vocal Dr Lambert' };
+  sendSmtpEmail.subject = sujet;
+  sendSmtpEmail.textContent = corps;
+ 
   // Pièce jointe audio si disponible
   if (audioUrl) {
     try {
@@ -80,31 +79,30 @@ Cabinet du Docteur Lambert — Emmerin (59320)
           res.on('end', () => resolve(Buffer.concat(chunks)));
         }).on('error', reject);
       });
-      mailOptions.attachments = [{
-        filename: `message-${Date.now()}.mp3`,
-        content: audioBuffer,
-        contentType: 'audio/mpeg'
+      sendSmtpEmail.attachment = [{
+        name: `message-${Date.now()}.mp3`,
+        content: audioBuffer.toString('base64')
       }];
     } catch (e) {
       console.error('Erreur récupération audio:', e.message);
     }
   }
-
+ 
   try {
-    await transporter.sendMail(mailOptions);
+    await brevoApi.sendTransacEmail(sendSmtpEmail);
     console.log(`📧 Email envoyé : ${sujet}`);
   } catch (err) {
-    console.error('❌ Erreur email :', err.message);
+    console.error('❌ Erreur Brevo :', err.message);
   }
 }
-
+ 
 // ============================================================
 // HELPERS
 // ============================================================
 function say(twiml, texte, voice = 'Polly.Lea') {
   twiml.say({ language: 'fr-FR', voice }, texte);
 }
-
+ 
 // Collecte nom (enregistrement vocal court)
 function collecterNom(twiml, redirectUrl) {
   say(twiml, 'Après le bip, dites votre prénom et votre nom, puis patientez.');
@@ -117,7 +115,7 @@ function collecterNom(twiml, redirectUrl) {
     trim: 'trim-silence'
   });
 }
-
+ 
 // Collecte numéro téléphone par touches + confirmation
 function collecterTelephone(twiml, redirectUrl) {
   const gather = twiml.gather({
@@ -128,21 +126,22 @@ function collecterTelephone(twiml, redirectUrl) {
   });
   say(gather, 'Tapez votre numéro de téléphone suivi de la touche dièse.');
 }
-
+ 
 // Message de fin standard
 function finStandard(twiml, appelant) {
   const gather = twiml.gather({
     numDigits: 1,
-    timeout: 5,
+    timeout: 8,
     action: `/garde-info?appelant=${encodeURIComponent(appelant)}`
   });
   say(gather, `Nous vous rappelons dès que possible.
     Pour prendre rendez-vous maintenant, consultez ${DOCTOLIB}.
-    Ou appuyez sur étoile pour le numéro du service de garde dentaire.
-    Au revoir.`);
+    Appuyez sur étoile pour le numéro du service de garde dentaire.
+    Tapez zéro pour revenir au menu.
+    Ou vous pouvez raccrocher. Au revoir.`);
   twiml.hangup();
 }
-
+ 
 // ============================================================
 // ACCUEIL
 // ============================================================
@@ -164,7 +163,7 @@ app.post('/entree', (req, res) => {
   twiml.hangup();
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/menu', (req, res) => {
   const { appelant } = req.query;
   const digit = req.body.Digits;
@@ -174,7 +173,7 @@ app.post('/menu', (req, res) => {
   else { say(twiml, 'Choix non reconnu. Au revoir.'); twiml.hangup(); }
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 // ============================================================
 // TOUCHE ÉTOILE → GARDE
 // ============================================================
@@ -189,16 +188,20 @@ app.post('/garde-info', (req, res) => {
       En cas de gonflement important ou d'infection,
       rapprochez-vous de votre médecin traitant ou appelez le quinze.
       Au revoir.`);
+    twiml.hangup();
+  } else if (digit === '0') {
+    twiml.redirect('/entree');
+  } else {
+    twiml.hangup();
   }
-  twiml.hangup();
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 // ============================================================
 // SESSIONS EN MÉMOIRE (évite les URLs trop longues)
 // ============================================================
 const sessions = {};
-
+ 
 function sauvegarderSession(appelant, data) {
   sessions[appelant] = { ...sessions[appelant], ...data, ts: Date.now() };
   // Nettoyer les sessions > 1h
@@ -206,11 +209,11 @@ function sauvegarderSession(appelant, data) {
     if (Date.now() - sessions[k].ts > 3600000) delete sessions[k];
   });
 }
-
+ 
 function getSession(appelant) {
   return sessions[appelant] || {};
 }
-
+ 
 // ============================================================
 // COLLECTE GÉNÉRIQUE : NOM → TÉLÉPHONE → FIN
 // ============================================================
@@ -228,7 +231,7 @@ app.post('/collecter-nom', (req, res) => {
   });
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/collecter-nom-enregistre', (req, res) => {
   const { appelant } = req.query;
   const recordingUrl = req.body.RecordingUrl || '';
@@ -243,17 +246,17 @@ app.post('/collecter-nom-enregistre', (req, res) => {
   say(gather, 'Tapez votre numéro de téléphone suivi de la touche dièse. Pour revenir au menu, tapez zéro.');
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/collecter-tel', (req, res) => {
   const { appelant } = req.query;
   const tel = req.body.Digits || '';
   const twiml = new VoiceResponse();
-
+ 
   if (tel === '0') {
     twiml.redirect('/entree');
     return res.type('text/xml').send(twiml.toString());
   }
-
+ 
   sauvegarderSession(appelant, { tel });
   const telLu = tel.split('').join(' ');
   const gather = twiml.gather({
@@ -264,13 +267,13 @@ app.post('/collecter-tel', (req, res) => {
   say(gather, `Vous avez tapé le ${telLu}. Si c'est correct, tapez 1. Pour recommencer, tapez 2.`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/collecter-tel-confirm', async (req, res) => {
   const { appelant } = req.query;
   const digit = req.body.Digits;
   const twiml = new VoiceResponse();
   const session = getSession(appelant);
-
+ 
   if (digit === '2') {
     const gather = twiml.gather({
       input: 'dtmf',
@@ -281,16 +284,16 @@ app.post('/collecter-tel-confirm', async (req, res) => {
     say(gather, 'Tapez votre numéro de téléphone suivi de la touche dièse.');
     return res.type('text/xml').send(twiml.toString());
   }
-
+ 
   // Envoyer l'email
   const detailsFinal = `${session.details || ''}\n→ Numéro rappel : ${session.tel || 'non fourni'}`;
   await envoyerEmail(appelant, session.motif || 'Message', detailsFinal, session.priorite || 'RAPPEL_J1', session.audio || null);
-
+ 
   say(twiml, 'Votre message a bien été enregistré.');
   finStandard(twiml, appelant);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 // ============================================================
 // BRANCHE 1 : URGENCE
 // ============================================================
@@ -310,7 +313,7 @@ app.post('/urgence', (req, res) => {
     Pour revenir au menu, tapez 0.`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/urgence-type', (req, res) => {
   const { appelant } = req.query;
   const digit = req.body.Digits;
@@ -323,7 +326,7 @@ app.post('/urgence-type', (req, res) => {
   else { say(twiml, 'Choix non reconnu.'); twiml.redirect(`/urgence?appelant=${encodeURIComponent(appelant)}`); }
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 // ---- DOULEUR ----
 app.post('/douleur-q1', (req, res) => {
   const { appelant } = req.query;
@@ -339,7 +342,7 @@ app.post('/douleur-q1', (req, res) => {
     Tapez 1 pour oui, tapez 2 pour non.`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/douleur-q2', (req, res) => {
   const { appelant } = req.query;
   const intense = req.body.Digits === '1';
@@ -353,7 +356,7 @@ app.post('/douleur-q2', (req, res) => {
     Tapez 1 pour oui, tapez 2 pour non.`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/douleur-fin', (req, res) => {
   const { appelant, intense } = req.query;
   const chaudFroid = req.body.Digits === '1';
@@ -363,7 +366,7 @@ app.post('/douleur-fin', (req, res) => {
   twiml.redirect(`/collecter-nom?appelant=${encodeURIComponent(appelant)}&motif=${encodeURIComponent('Urgence – Douleur dentaire')}&details=${encodeURIComponent(details)}&priorite=${priorite}`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 // ---- COURONNE / PROTHÈSE ----
 app.post('/prothese', (req, res) => {
   const { appelant } = req.query;
@@ -380,7 +383,7 @@ app.post('/prothese', (req, res) => {
     Pour une prothèse cassée, tapez 4.`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/prothese-type', (req, res) => {
   const { appelant } = req.query;
   const digit = req.body.Digits;
@@ -403,7 +406,7 @@ app.post('/prothese-type', (req, res) => {
   }
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/couronne-visible', (req, res) => {
   const { appelant } = req.query;
   const twiml = new VoiceResponse();
@@ -416,7 +419,7 @@ app.post('/couronne-visible', (req, res) => {
     Tapez 1 pour oui, tapez 2 pour non.`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/couronne-fin', (req, res) => {
   const { appelant } = req.query;
   const devant = req.body.Digits === '1';
@@ -426,7 +429,7 @@ app.post('/couronne-fin', (req, res) => {
   twiml.redirect(`/collecter-nom?appelant=${encodeURIComponent(appelant)}&motif=${encodeURIComponent('Urgence – Couronne tombée')}&details=${encodeURIComponent(details)}&priorite=${priorite}`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 // ---- PANSEMENT PERDU ----
 app.post('/pansement-q1', (req, res) => {
   const { appelant } = req.query;
@@ -439,7 +442,7 @@ app.post('/pansement-q1', (req, res) => {
   say(gather, `Ressentez-vous une douleur ? Tapez 1 pour oui, tapez 2 pour non.`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/pansement-q2', (req, res) => {
   const { appelant } = req.query;
   const douleur = req.body.Digits === '1';
@@ -453,7 +456,7 @@ app.post('/pansement-q2', (req, res) => {
     Tapez 1 pour une dent du devant, tapez 2 pour une dent du fond.`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/pansement-fin', (req, res) => {
   const { appelant, douleur } = req.query;
   const localisation = req.body.Digits === '1' ? 'devant' : 'fond de bouche';
@@ -463,7 +466,7 @@ app.post('/pansement-fin', (req, res) => {
   twiml.redirect(`/collecter-nom?appelant=${encodeURIComponent(appelant)}&motif=${encodeURIComponent('Urgence – Pansement perdu')}&details=${encodeURIComponent(details)}&priorite=${priorite}`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 // ---- CHOC / TRAUMATISME ----
 app.post('/choc-q1', (req, res) => {
   const { appelant } = req.query;
@@ -477,7 +480,7 @@ app.post('/choc-q1', (req, res) => {
     Tapez 1 pour oui, tapez 2 pour non.`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/choc-q2', async (req, res) => {
   const { appelant } = req.query;
   const twiml = new VoiceResponse();
@@ -498,7 +501,7 @@ app.post('/choc-q2', async (req, res) => {
     Tapez 1 pour oui, tapez 2 pour non.`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/choc-fin', (req, res) => {
   const { appelant } = req.query;
   const grave = req.body.Digits === '1';
@@ -517,7 +520,7 @@ app.post('/choc-fin', (req, res) => {
   twiml.redirect(`/collecter-nom?appelant=${encodeURIComponent(appelant)}&motif=${encodeURIComponent('Urgence – Choc/traumatisme')}&details=${encodeURIComponent(details)}&priorite=${priorite}`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 // ============================================================
 // BRANCHE 2 : RENDEZ-VOUS
 // ============================================================
@@ -534,7 +537,7 @@ app.post('/rdv', (req, res) => {
     Pour revenir au menu, tapez 0.`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/rdv-type', (req, res) => {
   const { appelant } = req.query;
   const digit = req.body.Digits;
@@ -545,7 +548,7 @@ app.post('/rdv-type', (req, res) => {
   else { say(twiml, 'Choix non reconnu.'); twiml.redirect(`/rdv?appelant=${encodeURIComponent(appelant)}`); }
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 // Prise de RDV → motif
 app.post('/rdv-motif', (req, res) => {
   const { appelant } = req.query;
@@ -563,7 +566,7 @@ app.post('/rdv-motif', (req, res) => {
     Parodontologie, tapez 5.`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/rdv-motif-choix', (req, res) => {
   const { appelant } = req.query;
   const digit = req.body.Digits;
@@ -588,7 +591,7 @@ app.post('/rdv-motif-choix', (req, res) => {
   });
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/rdv-nom-enregistre', (req, res) => {
   const { appelant, motif } = req.query;
   const audioNom = req.body.RecordingUrl || '';
@@ -604,7 +607,7 @@ app.post('/rdv-nom-enregistre', (req, res) => {
   });
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/rdv-date-enregistre', (req, res) => {
   const { appelant, motif, audioNom } = req.query;
   const audioDate = req.body.RecordingUrl || '';
@@ -613,7 +616,7 @@ app.post('/rdv-date-enregistre', (req, res) => {
   collecterTelephone(twiml, `/rdv-tel?appelant=${encodeURIComponent(appelant)}&motif=${encodeURIComponent(motif)}&audioNom=${encodeURIComponent(audioNom)}&audioDate=${encodeURIComponent(audioDate)}`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/rdv-tel', (req, res) => {
   const { appelant, motif, audioNom, audioDate } = req.query;
   const tel = req.body.Digits || '';
@@ -627,7 +630,7 @@ app.post('/rdv-tel', (req, res) => {
   say(gather, `Vous avez tapé le ${telLu}. Si c'est correct, tapez 1. Pour recommencer, tapez 2.`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/rdv-tel-confirm', async (req, res) => {
   const { appelant, motif, audioNom, audioDate, tel } = req.query;
   const digit = req.body.Digits;
@@ -641,7 +644,7 @@ app.post('/rdv-tel-confirm', async (req, res) => {
   finStandard(twiml, appelant);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 // Annulation RDV
 app.post('/rdv-annuler', (req, res) => {
   const { appelant } = req.query;
@@ -656,7 +659,7 @@ app.post('/rdv-annuler', (req, res) => {
   });
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/rdv-annuler-nom', (req, res) => {
   const { appelant } = req.query;
   const audioNom = req.body.RecordingUrl || '';
@@ -671,7 +674,7 @@ app.post('/rdv-annuler-nom', (req, res) => {
   });
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/rdv-annuler-date', (req, res) => {
   const { appelant, audioNom } = req.query;
   const audioDate = req.body.RecordingUrl || '';
@@ -679,7 +682,7 @@ app.post('/rdv-annuler-date', (req, res) => {
   collecterTelephone(twiml, `/rdv-annuler-tel?appelant=${encodeURIComponent(appelant)}&audioNom=${encodeURIComponent(audioNom)}&audioDate=${encodeURIComponent(audioDate)}`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/rdv-annuler-tel', (req, res) => {
   const { appelant, audioNom, audioDate } = req.query;
   const tel = req.body.Digits || '';
@@ -693,7 +696,7 @@ app.post('/rdv-annuler-tel', (req, res) => {
   say(gather, `Vous avez tapé le ${telLu}. Si c'est correct, tapez 1. Pour recommencer, tapez 2.`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/rdv-annuler-confirm', async (req, res) => {
   const { appelant, audioNom, audioDate, tel } = req.query;
   const digit = req.body.Digits;
@@ -707,10 +710,10 @@ app.post('/rdv-annuler-confirm', async (req, res) => {
   finStandard(twiml, appelant);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 // Transcription callback générique
 app.post('/rdv-transcription-nom', (req, res) => { res.sendStatus(200); });
-
+ 
 // ============================================================
 // BRANCHE 3 : ADMINISTRATIF
 // ============================================================
@@ -731,7 +734,7 @@ app.post('/administratif', (req, res) => {
     Pour revenir au menu, tapez 0.`);
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 app.post('/admin-type', (req, res) => {
   const { appelant } = req.query;
   const digit = req.body.Digits;
@@ -754,7 +757,7 @@ app.post('/admin-type', (req, res) => {
   }
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 // ============================================================
 // BRANCHE 4 : INFOS PRATIQUES
 // ============================================================
@@ -779,7 +782,7 @@ app.post('/infos', (req, res) => {
   twiml.hangup();
   res.type('text/xml').send(twiml.toString());
 });
-
+ 
 // ============================================================
 // DÉMARRAGE
 // ============================================================
