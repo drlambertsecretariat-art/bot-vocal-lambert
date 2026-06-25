@@ -130,7 +130,7 @@ function collecterTelephone(twiml, redirectUrl) {
 }
 
 // Message de fin standard
-function finStandard(twiml, tel) {
+function finStandard(twiml, appelant) {
   const gather = twiml.gather({
     numDigits: 1,
     timeout: 5,
@@ -154,15 +154,12 @@ app.post('/entree', (req, res) => {
     action: `/menu?appelant=${encodeURIComponent(appelant)}`,
     timeout: 8
   });
-  say(gather, `Bonjour, vous êtes bien au cabinet du Docteur Lambert à Emmerin.
-    Je suis Marie, l'assistante virtuelle du cabinet.
-    Je prends vos messages en dehors des heures d'ouverture,
-    du lundi au jeudi de neuf heures à dix-huit heures.
-    Pour toute urgence vitale, composez le quinze.
-    Pour une urgence dentaire, tapez 1.
-    Pour prendre ou annuler un rendez-vous, tapez 2.
+  say(gather, `Bonjour, cabinet du Docteur Lambert.
+    Je suis Marie, votre assistante virtuelle.
+    Pour une urgence, tapez 1.
+    Pour un rendez-vous, tapez 2.
     Pour une question administrative, tapez 3.
-    Pour nos horaires et informations pratiques, tapez 4.`);
+    Pour nos informations pratiques, tapez 4.`);
   say(twiml, 'Nous n\'avons pas reçu votre choix. Au revoir.');
   twiml.hangup();
   res.type('text/xml').send(twiml.toString());
@@ -247,7 +244,9 @@ app.post('/collecter-tel-confirm', async (req, res) => {
   // Envoyer l'email avec tout
   const detailsFinal = `${decodeURIComponent(details)}\n→ Numéro rappel : ${tel}`;
   await envoyerEmail(appelant, decodeURIComponent(motif), detailsFinal, priorite, decodeURIComponent(audio));
-  finStandard(twiml, appelant);
+  // Message de fin explicite avant finStandard
+  say(twiml, 'Votre message a bien été enregistré.');
+  finStandard(twiml, tel || appelant);
   res.type('text/xml').send(twiml.toString());
 });
 
@@ -320,9 +319,7 @@ app.post('/douleur-fin', (req, res) => {
   const twiml = new VoiceResponse();
   const priorite = intense === 'true' ? 'URGENTE' : 'RAPPEL_J1';
   const details = `Type : Douleur\n→ Intense : ${intense === 'true' ? 'OUI' : 'Non'}\n→ Chaud/froid : ${chaudFroid ? 'Oui' : 'Non'}`;
-  say(twiml, `En cas de saignement, mordez sur une compresse propre pendant vingt minutes.
-    Si le saignement ne s'arrête pas, consultez les urgences.
-    En cas de gonflement, appelez le quinze ou votre médecin traitant.`);
+  say(twiml, `En cas de gonflement, appelez le quinze ou votre médecin traitant.`);
   twiml.redirect(`/collecter-nom?appelant=${encodeURIComponent(appelant)}&motif=${encodeURIComponent('Urgence – Douleur dentaire')}&details=${encodeURIComponent(details)}&priorite=${priorite}`);
   res.type('text/xml').send(twiml.toString());
 });
