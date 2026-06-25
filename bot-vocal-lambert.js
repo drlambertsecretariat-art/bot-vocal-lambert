@@ -130,7 +130,7 @@ function collecterTelephone(twiml, redirectUrl) {
 }
 
 // Message de fin standard
-function finStandard(twiml, appelant) {
+function finStandard(twiml, tel) {
   const gather = twiml.gather({
     numDigits: 1,
     timeout: 5,
